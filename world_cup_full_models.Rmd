@@ -1,0 +1,840 @@
+---
+title: "final-project"
+output:
+  html_document:
+    toc: true
+    toc_float: true
+    number_sections: true
+    code_folding: show
+date: "2026-06-22"
+---
+
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+#Introduction
+
+Soccer has been an important part of my life since I can remember. I’ve been a fan since I was 9. Over my time at Boston University so far, I’ve been fortunate enough to combine Soccer with Math, another of my passions, to a great extent. I’ve worked with the Terrier Women’s Soccer Team as a data analyst (won a championship), did two funded undergraduate research projects on recruitment analysis, and worked with DC United in the MLS as a recruitment analytics intern. I read research papers in my spare time, and came across this paper that claimed that altitude is the only important geographical factor: https://dataverse.harvard.edu/dataset.xhtml?persistentId=doi:10.7910/DVN/G5SJXK
+
+When the 2026 World Cup draw was made, one aspect immediately stood out to various news outlets and me - the World Cup is spread across 3 countries for the first time, and will present interesting geographical and logistical challenges for teams, given the diversity in aspects like temperature, altitude, and travel distances. This raised the question of how these differing geographical attributes affect the performance of teams. 
+
+This project aims to analyse whether measurable geographical quantities like travel distance, altitude, temperature, etc., help explain performance variances between two teams. More academically,  I hope to determine if these aforementioned factors have a statistically significant relationship with goal differential in the 2026 FIFA World Cup. 
+
+```{r}
+# Run this installation line only once if the packages are not installed:
+# install.packages(c("tidymodels", "tidyverse", "ggrepel", "rnaturalearth",
+#                    "maps", "sf", "ranger", "kknn"))
+
+library(tidymodels)
+library(ggrepel)
+library(tidyverse)
+library(rnaturalearth)
+library(maps)
+library(sf)
+library(ranger)   # Random Forest engine
+library(kknn)     # KNN engine
+```
+
+##Data Importing and Cleaning (Please look at the data-joining file for code)
+
+I broke down my required dataset into 4 parts after thinking about the research question: a dataset of all results so far in the tournament, a dataset containing essential information about tournament venues, the locations of teams’ training bases, and the average temperature of all participating teams. 
+
+I found the following datasets that served the first two purposes: 
+
+Venues: https://www.kaggle.com/datasets/mominullptr/fifa-world-cup-2026-dataset?select=venues.csv
+
+Match Results: 
+https://www.kaggle.com/datasets/swaptr/fifa-wc-2026-matches/data
+
+Team locations:
+https://inside.fifa.com/organisation/media-releases/world-cup-2026-team-base-camps-tbc-48-nations-usa-mexico-canada (later made a CSV myself that included latitudes and longitudes, sourced from Google AI Overview)
+
+Average Temperatures of Participating Teams: 
+Sourced from Google AI Overview
+
+
+Temperature of Venues:
+https://www.reuters.com/graphics/CLIMATE-AUTOMATED/MONITOR/akpeykqqapr/world-cup-2026/
+
+
+After an initial inspection of all the data, I realised that two teams had different names (Côte d'Ivoire/Ivory Coast, Bosnia and Herzegovina/Bosnia & Herz), which had to be normalised. Then, I had to normalise venue and stadium names, given FIFA’s new stadium naming rules, which caused confusion among data aggregators. 
+
+I joined the tables and renamed some columns, as can be seen in data-joining.R. I had to then execute some mutate functions to calculate quantities like home_temp_change, home_altitude_change, etc. I finally used a haversine function to compute distances before selecting my final variables of interest to be included in the final dataset. The most important variables for analysis are defined below:
+
+travel_advantage_km: Measures how much farther the away team travelled to the match venue compared to the home team, based on distance from their respective training bases
+
+altitude_adaptation_advantage: Measures which team is naturally more used to the altitude of the match venue, based on the difference between the venue’s elevation and each country’s average elevation
+
+temp_adaptation_advantage: Measures which team is more used to the temperature at the venue, based on the difference between the venue temperature and each team’s average national temperature. 
+
+The formula is: | Venue Temperature - Away Average Temperature | - | Venue Temperature - Home Average Temperature |
+
+
+
+```{r}
+# The code checks the two most likely filenames.
+# Keep the CSV in the same folder as this .Rmd file.
+data_path <- case_when(
+  file.exists("final_wc(1).csv") ~ "final_wc(1).csv",
+  file.exists("final_wc.csv") ~ "final_wc.csv",
+  file.exists("world_cup_2026_dataset.csv") ~ "world_cup_2026_dataset.csv",
+  TRUE ~ NA_character_
+)
+
+if (is.na(data_path)) {
+  stop("CSV file not found. Put final_wc(1).csv, final_wc.csv, or world_cup_2026_dataset.csv in the same folder as this Rmd file.")
+}
+
+wc <- read_csv(data_path, show_col_types = FALSE) |>
+  mutate(date = as.Date(date))
+
+```
+```{r}
+glimpse(wc)
+
+```
+
+
+I later realised that adding continents would be an important piece of information
+
+```{r}
+continent_matching <- c(
+  # na
+  "Mexico" = "North America",
+  "United States" = "North America",
+  "Canada" = "North America",
+  "Curaçao" = "North America",
+  "Haiti" = "North America",
+  "Panama" = "North America",
+  # sa
+  "Brazil" = "South America",
+  "Argentina" = "South America",
+  "Colombia" = "South America",
+  "Ecuador" = "South America",
+  "Paraguay" = "South America",
+  "Uruguay" = "South America",
+  # eu
+  "Austria" = "Europe",
+  "Belgium" = "Europe",
+  "Bosnia & Herz." = "Europe",
+  "Croatia" = "Europe",
+  "Czechia" = "Europe",
+  "England" = "Europe",
+  "France" = "Europe",
+  "Germany" = "Europe",
+  "Netherlands" = "Europe",
+  "Norway" = "Europe",
+  "Portugal" = "Europe",
+  "Scotland" = "Europe",
+  "Spain" = "Europe",
+  "Sweden" = "Europe",
+  "Switzerland" = "Europe",
+  "Türkiye" = "Europe",
+  # af
+  "Algeria" = "Africa",
+  "Cabo Verde" = "Africa",
+  "Congo DR" = "Africa",
+  "Côte d'Ivoire" = "Africa",
+  "Egypt" = "Africa",
+  "Ghana" = "Africa",
+  "Morocco" = "Africa",
+  "Senegal" = "Africa",
+  "South Africa" = "Africa",
+  "Tunisia" = "Africa",
+  # as
+  "IR Iran" = "Asia",
+  "Iraq" = "Asia",
+  "Japan" = "Asia",
+  "Jordan" = "Asia",
+  "Korea Republic" = "Asia",
+  "Qatar" = "Asia",
+  "Saudi Arabia" = "Asia",
+  "Uzbekistan" = "Asia",
+  # oc
+  "Australia" = "Oceania",
+  "New Zealand" = "Oceania"
+)
+
+wc$home_continent <- continent_matching[wc$home_team]
+wc$away_continent <- continent_matching[wc$away_team]
+```
+
+
+
+##EDA
+
+
+Moving to EDA, I immediately chose to analyse the 3 variables I introduced previously. I began by analysing the locations of Stadiums to identify the spread of differing longitudes and latitudes that may affect geographical quantities. 
+
+As we can see, most of the stadiums are located on the coasts of Canada and the USA. Mexico is narrow in width, hence most of its stadiums are right down in the middle of the country. Looking at the vast spread of stadiums from coast to coast made me wonder where teams are staying on non-match days. The main reason behind the follow-up is that teams will look to reduce the amount of travel to avoid discontinuity in routines during an important sporting event. 
+
+
+```{r}
+#plot stadium locations on a north american map
+
+#?`rnaturalearth-package`
+#?admin
+
+
+
+na_map <- ne_countries(scale = "medium", returnclass = "sf") |> 
+  subset(admin %in% c("United States of America", "Canada", "Mexico"))
+
+
+
+wc |> select(
+  "latitude",
+  "longitude",
+  "city", 
+  "venue"
+)
+
+ggplot() +
+  geom_sf(data = na_map, fill = "white", color = "grey", linewidth = 0.75) + 
+  geom_sf(data = plot, color = "#b7b5e4", size = 3, alpha = 0.8) +
+  geom_sf_text(data = plot, aes(label = city), size = 2.25, nudge_y = 1.5) +
+  coord_sf(xlim = c(-135, -60), ylim = c(13, 53)) +
+  theme_minimal() + 
+  labs(title = "Stadium Locations - World Cup 2026", 
+       y = "Latitude", 
+       x = "Longitude")
+
+ggplot(wc, aes(goal_diff)) +
+    geom_histogram(
+        binwidth = 1,
+        fill = "steelblue",
+        color = "white"
+    )
+missing_summary <-
+    wc |>
+    summarise(across(everything(), ~sum(is.na(.))))
+```
+
+Here are the training camp locations for all 48 teams. The map overlays well with the stadium map, since they are looking to travel the least. It is no surprise to see the highest number of sites in Kansas, since it is a (somewhat) midpoint between the two coasts and the south. It is also no surprise to see sites located in the northeast US, since 4 stadiums are close to it. I’ve also attached a plot about Team England, one of the teams in Kansas, to check my understanding.
+
+```{r}
+#plot training camp heatmaps
+
+na_map <- ne_countries(scale = "medium", returnclass = "sf") |> 
+  subset(admin %in% c("United States of America", "Canada", "Mexico"))
+
+
+
+wc |> select(
+  "home_training_lat",
+  "home_training_lon",
+  "home_training_site", 
+)
+
+
+bubble_data <- wc |>
+  group_by(home_training_site, home_training_lat, home_training_lon) |>
+  summarise(count = n())
+
+ggplot() +
+  geom_sf(data = na_map, fill = "white", color = "grey", linewidth = 0.75) + 
+  geom_point(
+    data = bubble_data,
+    aes(x = home_training_lon, y = home_training_lat, size = count, fill = count),alpha = 0.85, shape = 21) +
+  scale_fill_viridis_c(option = "viridis",   
+    name = "Number of Sites") +
+  coord_sf(xlim = c(-135, -60), ylim = c(13, 53)) + 
+  theme_minimal() + 
+  labs(
+    title = "Training Sites - World Cup 2026", 
+    subtitle = "Bubble sizes reflect the number of base camps",
+    y = "Latitude", 
+    x = "Longitude"
+  )
+
+```
+```{r}
+#plot example travel
+#?rep
+#?xend
+#?geom_segment
+
+
+na_map <- ne_countries(scale = "medium", returnclass = "sf") |> 
+  subset(admin %in% c("United States of America", "Canada", "Mexico"))
+
+bubble_data <- wc |> 
+  group_by(home_training_site, home_training_lat, home_training_lon) |> 
+  summarise(count = n())
+
+dallas_lon <- -97.0928; dallas_lat <- 32.7473
+boston_lon <- -71.2643; boston_lat <- 42.0909
+
+england_camp <- wc |> 
+  filter(home_team == "England") |> 
+  select(home_training_lon, home_training_lat) |> 
+  distinct()
+
+england_travel <- data.frame(
+  from_lon = rep(england_camp$home_training_lon, 2),
+  from_lat = rep(england_camp$home_training_lat, 2),
+  to_lon   = c(dallas_lon, boston_lon),
+  to_lat   = c(dallas_lat, boston_lat),
+  dest     = c("Dallas", "Boston")
+)
+
+ggplot() +
+  geom_sf(data = na_map, fill = "white", color = "grey", linewidth = 0.75) +
+  geom_segment(
+    data = england_travel,
+    aes(x = from_lon, y = from_lat, xend = to_lon, yend = to_lat),
+    color = "red", linewidth = 1.2, linetype = "dashed", alpha = 0.9
+  ) +
+  geom_point(
+    data = bubble_data, 
+    aes(x = home_training_lon, y = home_training_lat, size = count, fill = count),
+    alpha = 0.85, shape = 21
+  ) + 
+  scale_fill_viridis_c(option = "viridis", name = "Number of Sites") + 
+  coord_sf(xlim = c(-135, -60), ylim = c(13, 53)) + 
+  theme_minimal() + 
+  labs( 
+    title = "Training Sites & England Travel - World Cup 2026", 
+    subtitle = "Dashed lines show England's routes to Arlington (Dallas) and Foxborough (Boston) - so far", 
+    y = "Latitude", 
+    x = "Longitude" 
+  )
+
+```
+
+Naturally, I looked into the final geographical quantity - temperature. I examined the mean temperature of venues to get an idea of how the latitudes and longitudes matter. 
+
+
+
+```{r}
+#plot average temperature
+
+
+na_map <- ne_countries(scale = "medium", returnclass = "sf") |> 
+  subset(admin %in% c("United States of America", "Canada", "Mexico"))
+
+
+
+wc |> select(
+  "temp_f",
+  "city",
+  "latitude",
+  "longitude"
+)
+
+
+bubble_data <- wc |>
+  group_by(city, temp_f, longitude, latitude) |>
+  summarise(mean_temp = mean(temp_f))
+
+ggplot() +
+  geom_sf(data = na_map, fill = "white", color = "grey", linewidth = 0.75) + 
+  geom_point(
+    data = bubble_data,
+    aes(x = longitude, y = latitude, size = mean_temp, fill = mean_temp),alpha = 0.85, shape = 21) +
+  scale_fill_viridis_c(option = "magma",   
+    name = "Temperature (F)") +
+  coord_sf(xlim = c(-135, -60), ylim = c(13, 53)) + 
+  theme_minimal() + 
+  labs(
+    title = "Mean Temperature - World Cup 2026", 
+    subtitle = "Bubble sizes reflect the scale of heat",
+    y = "Latitude", 
+    x = "Longitude"
+  )
+
+```
+Interestingly, the mean temperature of the West Coast is low. Considering that the data was collected during the game, it made much better sense as games on the West Coast were kicking off between 7 pm and 9 pm PST.I then looked at the final variable of interest, elevation of venues. After getting an idea of all 3 geographical quantities, I went on with linear regression analysis. 
+
+
+```{r}
+#plot altitude
+
+#in descending order
+wc_em <- wc |> distinct(city, elevation_meters)
+
+ggplot(wc_em, aes(x = reorder(city, -elevation_meters), y = elevation_meters)) +
+  geom_col(fill = "#b7b5e4") +
+  geom_text(aes(label = elevation_meters),size = 3) +
+  coord_flip() +
+  labs(x = "City", y = "Elevation in meters", title = "Elevation of Venues - World Cup 2026")
+```
+
+So Mexico is technically the only country with high altitude stadiums. After getting an idea of all 3 geographical quantities, I went on with linear regression analysis. 
+
+
+##Regression Analysis
+
+I began with the variable altitude advantage as the x variable with goal differential as the response variable. This was a positive slope, as expected, with an R-squared value of 0.0065. The p-value is 0.4, making it statistically insignificant. 
+
+
+```{r}
+#goal_diff ~ altitude_adaptation_advantage (filtered to >100 elevation meters)
+
+elevated_games <- wc |>
+  filter(elevation_meters > 100)
+
+head(elevated_games)
+
+linear_model <- linear_reg() |> set_engine("lm")
+
+fit_with_formula <- linear_model |>
+  fit(goal_diff ~ altitude_adaptation_advantage, data = elevated_games)
+
+fit_with_formula |> extract_fit_engine() |> summary()
+fit_with_formula |> tidy()
+
+elevated_games |> ggplot(aes(x = altitude_adaptation_advantage, y = goal_diff)) +
+  geom_point(aes(color = home_continent)) +
+  geom_smooth(method = "lm") +
+  labs(x = "Altitude Adaptation Advantage (m)", 
+       y = "Goal Differential", 
+       title = "Altitude Advantage effects on Goal Differential - World Cup 2026")
+
+```
+
+I then continued with the temperature advantage variable, keeping goal differential as the y variable. 
+
+
+
+```{r}
+#goal_diff ~ temp_adaptation_advantage (filtered to non west coast as mean temp was low there)
+
+non_west_games <- wc |>
+  filter(longitude > -110)
+
+non_west_games
+
+linear_model <- linear_reg() |> set_engine("lm")
+
+fit_with_formula <- linear_model |>
+  fit(goal_diff ~ temp_adaptation_advantage, data = non_west_games)
+
+fit_with_formula |> extract_fit_engine() |> summary()
+fit_with_formula |> tidy()
+
+non_west_games |> ggplot(aes(x = temp_adaptation_advantage, y = goal_diff)) +
+  geom_point(aes(color = home_continent)) +
+  geom_smooth(method = "lm") +
+  labs(x = "Temperature Adaptation Advantage (F)", 
+       y = "Goal Differential", 
+       title = "Temperature Advantage effects on Goal Differential - World Cup 2026")
+
+```
+
+Interestingly, this had a negative slope (R-squared:0.2, p-value: 0.015). It made me wonder about two observations on the plot - 1) Why is it negative?, and 2) Why are European teams above the slope?. Regarding 1), half of the stadiums in the USA are NFL stadiums, which feature a closed roof, essentially taking away some effect of temperature. Moreover, FIFA introduced hydration breaks at minutes 22 and 70 of the game, which allows the players to cool off. Regarding 2), European teams have a higher ELO compared to any other continent.  
+
+I then looked at travel advantage. 
+
+
+```{r}
+
+#goal_diff ~ travel_advantage_km
+
+travel_adv <- wc |>
+  filter(travel_advantage_km > 100)
+
+travel_adv
+
+linear_model <- linear_reg() |> set_engine("lm")
+
+fit_with_formula <- linear_model |>
+  fit(goal_diff ~ travel_advantage_km, data = travel_adv)
+
+fit_with_formula |> extract_fit_engine() |> summary()
+fit_with_formula |> tidy()
+
+travel_adv |> ggplot(aes(x = travel_advantage_km, y = goal_diff)) +
+  geom_point(aes(color = home_continent)) +
+  geom_smooth(method = "lm") +
+    labs(x = "Travel Advantage (km)", 
+       y = "Goal Differential", 
+       title = "Travel Advantage effects on Goal Differential - World Cup 2026")
+
+```
+
+It gave an r-squared of 0.7 and a p-value of 0.73. It provides a very minute advantage, and it made me think why. I concluded that team management is getting better in terms of logistical planning and scheduling. 
+
+I finished with a combined no interaction and interaction model, with y as a response variable and travel advantage, temperature advantage, and altitude advantage as the x variables. 
+
+
+
+```{r}
+#all 3, without interaction
+    
+linear_model <- linear_reg() |> set_engine("lm")
+
+fit_with_formula <- linear_model |>
+  fit(goal_diff ~ travel_advantage_km + altitude_adaptation_advantage + temp_adaptation_advantage, data = wc)
+
+fit_with_formula |> extract_fit_engine() |> summary()
+fit_with_formula |> tidy()
+
+```
+```{r}
+
+#all 3, with interaction
+
+linear_model <- linear_reg() |> set_engine("lm")
+
+fit_with_formula <- linear_model |>
+  fit(goal_diff ~ travel_advantage_km * altitude_adaptation_advantage * temp_adaptation_advantage, data = wc)
+
+fit_with_formula |> extract_fit_engine() |> summary()
+fit_with_formula |> tidy()
+
+
+```
+It yielded an adjusted R-squared of 0.25, with only the temperature advantage variable shown to be significant. The non-interaction model with the same variables yielded nearly the same result. 
+
+I did not do a train/test model as the dataset had only 40 rows, and splitting the dataset would have led to unstable estimates.
+
+
+
+## Full Predictive Model Comparison
+
+The next analysis compares three regression models using the same response variable, `goal_diff`:
+
+1. Multiple linear regression;
+2. Random Forest regression;
+3. K-nearest neighbors regression.
+
+The models use **all available explanatory variables** after excluding `home_score`, `away_score`, and `total_goals`. These three columns are not legitimate predictors because they directly determine `goal_diff` and would create data leakage. The `goal_diff` column is also excluded from the predictor set because it is the response variable.
+
+Because this dataset is relatively small, the models are evaluated with repeated five-fold cross-validation instead of relying on only one train/test split. The same folds are used for all three methods.
+
+```{r full-model-data, message=FALSE, warning=FALSE}
+# ============================================================
+# PREPARE DATA FOR THE THREE FULL MODELS
+# ============================================================
+
+# Remove variables that reveal the outcome.
+# Every remaining variable is used as a predictor through:
+#                 goal_diff ~ .
+model_data <- wc |>
+  select(
+    -home_score,
+    -away_score,
+    -total_goals
+  ) |>
+  mutate(
+    across(where(is.character), as.factor)
+  )
+
+# Confirm which variables will be used.
+model_predictors <- model_data |>
+  select(-goal_diff) |>
+  names()
+
+cat("Number of original predictor variables:", length(model_predictors), "\n")
+print(model_predictors)
+
+# Use repeated 5-fold cross-validation because the sample is small.
+set.seed(2026)
+wc_folds <- vfold_cv(
+  model_data,
+  v = 5,
+  repeats = 5,
+  strata = goal_diff
+)
+```
+
+### Preprocessing recipes
+
+The formula `goal_diff ~ .` is the part of the code that instructs R to use every remaining variable as a predictor. Character variables are converted into dummy variables. Missing numeric values are replaced by medians, missing categories are given an explicit `unknown` level, and new categories are handled safely during resampling. KNN additionally requires normalization because it is based on distances.
+
+```{r full-model-recipes, message=FALSE, warning=FALSE}
+# ============================================================
+# COMMON RECIPE: LINEAR REGRESSION AND RANDOM FOREST
+# ============================================================
+
+full_recipe <- recipe(goal_diff ~ ., data = model_data) |>
+  # Extract useful calendar information from the match date.
+  step_date(date, features = c("month", "dow")) |>
+  step_rm(date) |>
+  # Handle missing categorical values and categories not seen in a fold.
+  step_unknown(all_nominal_predictors()) |>
+  step_novel(all_nominal_predictors()) |>
+  # Convert categorical variables to 0/1 dummy variables.
+  step_dummy(all_nominal_predictors()) |>
+  # Replace missing numeric values with the training-fold median.
+  step_impute_median(all_numeric_predictors()) |>
+  # Remove predictors with no variation.
+  step_zv(all_predictors())
+
+# ============================================================
+# KNN RECIPE
+# ============================================================
+
+knn_recipe <- recipe(goal_diff ~ ., data = model_data) |>
+  step_date(date, features = c("month", "dow")) |>
+  step_rm(date) |>
+  step_unknown(all_nominal_predictors()) |>
+  step_novel(all_nominal_predictors()) |>
+  step_dummy(all_nominal_predictors()) |>
+  step_impute_median(all_numeric_predictors()) |>
+  step_zv(all_predictors()) |>
+  # KNN compares distances, so predictors must be placed on similar scales.
+  step_normalize(all_numeric_predictors())
+```
+
+### Model 1: Multiple linear regression using all variables
+
+```{r full-linear-regression, message=FALSE, warning=FALSE}
+# ============================================================
+# MODEL 1: MULTIPLE LINEAR REGRESSION
+# ============================================================
+
+lm_spec <- linear_reg() |>
+  set_engine("lm")
+
+lm_workflow <- workflow() |>
+  add_recipe(full_recipe) |>
+  add_model(lm_spec)
+
+# Evaluate the model with the same repeated CV folds used below.
+set.seed(2026)
+lm_resamples <- fit_resamples(
+  lm_workflow,
+  resamples = wc_folds,
+  metrics = metric_set(rmse, mae, rsq),
+  control = control_resamples(save_pred = TRUE)
+)
+
+# Average cross-validation performance.
+lm_metrics <- collect_metrics(lm_resamples) |>
+  mutate(model = "Multiple Linear Regression")
+
+lm_metrics
+
+# Fit the final linear regression to the complete dataset.
+lm_final_fit <- fit(lm_workflow, data = model_data)
+
+# Coefficients, standard errors, test statistics, and p-values.
+lm_coefficients <- lm_final_fit |>
+  extract_fit_engine() |>
+  broom::tidy()
+
+lm_coefficients |>
+  arrange(p.value) |>
+  slice_head(n = 20)
+```
+
+### Model 2: Random Forest using all variables
+
+```{r full-random-forest, message=FALSE, warning=FALSE}
+# ============================================================
+# MODEL 2: RANDOM FOREST REGRESSION
+# ============================================================
+
+# Tune mtry (number of candidate variables per split) and min_n
+# (minimum observations required in a terminal node).
+rf_spec <- rand_forest(
+  trees = 1000,
+  mtry = tune(),
+  min_n = tune()
+) |>
+  set_mode("regression") |>
+  set_engine(
+    "ranger",
+    importance = "permutation",
+    seed = 2026
+  )
+
+rf_workflow <- workflow() |>
+  add_recipe(full_recipe) |>
+  add_model(rf_spec)
+
+# Candidate hyperparameter combinations.
+set.seed(2026)
+rf_grid <- grid_latin_hypercube(
+  mtry(range = c(2L, 25L)),
+  min_n(range = c(2L, 20L)),
+  size = 25
+)
+
+# Tune with repeated cross-validation.
+set.seed(2026)
+rf_tuned <- tune_grid(
+  rf_workflow,
+  resamples = wc_folds,
+  grid = rf_grid,
+  metrics = metric_set(rmse, mae, rsq),
+  control = control_grid(save_pred = TRUE)
+)
+
+# Select the parameters with the lowest cross-validation RMSE.
+best_rf <- select_best(rf_tuned, metric = "rmse")
+best_rf
+
+# Finalize and fit the selected Random Forest to all observations.
+rf_final_workflow <- finalize_workflow(rf_workflow, best_rf)
+rf_final_fit <- fit(rf_final_workflow, data = model_data)
+
+# Cross-validation performance for the selected parameter combination.
+rf_metrics <- collect_metrics(rf_tuned) |>
+  semi_join(best_rf, by = names(best_rf)) |>
+  mutate(model = "Random Forest")
+
+rf_metrics
+
+# Variable importance without using the vip package.
+rf_engine <- rf_final_fit |>
+  extract_fit_engine()
+
+rf_importance <- tibble(
+  variable = names(rf_engine$variable.importance),
+  importance = unname(rf_engine$variable.importance)
+) |>
+  arrange(desc(importance))
+
+rf_importance |>
+  slice_head(n = 20)
+
+# Plot the 20 most important Random Forest predictors.
+rf_importance |>
+  slice_head(n = 20) |>
+  mutate(variable = forcats::fct_reorder(variable, importance)) |>
+  ggplot(aes(x = importance, y = variable)) +
+  geom_col() +
+  labs(
+    title = "Random Forest Variable Importance",
+    subtitle = "Top 20 predictors using permutation importance",
+    x = "Permutation importance",
+    y = NULL
+  ) +
+  theme_minimal()
+```
+
+### Model 3: K-nearest neighbors using all variables
+
+```{r full-knn, message=FALSE, warning=FALSE}
+# ============================================================
+# MODEL 3: K-NEAREST NEIGHBORS REGRESSION
+# ============================================================
+
+knn_spec <- nearest_neighbor(
+  neighbors = tune(),
+  weight_func = tune(),
+  dist_power = tune()
+) |>
+  set_mode("regression") |>
+  set_engine("kknn")
+
+knn_workflow <- workflow() |>
+  add_recipe(knn_recipe) |>
+  add_model(knn_spec)
+
+# Tune the number of neighbors, weighting rule, and distance power.
+set.seed(2026)
+knn_grid <- grid_latin_hypercube(
+  neighbors(range = c(3L, 30L)),
+  weight_func(values = c("rectangular", "triangular", "epanechnikov", "optimal")),
+  dist_power(range = c(1, 2)),
+  size = 30
+)
+
+set.seed(2026)
+knn_tuned <- tune_grid(
+  knn_workflow,
+  resamples = wc_folds,
+  grid = knn_grid,
+  metrics = metric_set(rmse, mae, rsq),
+  control = control_grid(save_pred = TRUE)
+)
+
+best_knn <- select_best(knn_tuned, metric = "rmse")
+best_knn
+
+# Finalize and fit the selected KNN model to the complete dataset.
+knn_final_workflow <- finalize_workflow(knn_workflow, best_knn)
+knn_final_fit <- fit(knn_final_workflow, data = model_data)
+
+knn_metrics <- collect_metrics(knn_tuned) |>
+  semi_join(best_knn, by = names(best_knn)) |>
+  mutate(model = "KNN")
+
+knn_metrics
+```
+
+### Comparison of the three models
+
+A lower RMSE and MAE indicate better prediction. A higher R-squared indicates that the model explains a larger proportion of the variation in goal differential. Cross-validated metrics should be used for the main comparison rather than performance calculated on the same observations used to fit the model.
+
+```{r full-model-comparison, message=FALSE, warning=FALSE}
+# ============================================================
+# FINAL MODEL COMPARISON TABLE
+# ============================================================
+
+print(lm_metrics)
+
+print(rf_metrics)
+
+print(knn_metrics)
+
+library(tibble)
+library(knitr)
+library(kableExtra)
+
+model_table <- tibble(
+  Model = c(
+    "Multiple Linear Regression",
+    "K-Nearest Neighbors",
+    "Random Forest"
+  ),
+  Predictors = c(
+    "All variables",
+    "All variables",
+    "All variables"
+  ),
+  RMSE = c(
+    1.956,
+    1.956,
+    1.968
+  ),
+  MAE = c(
+    1.529,
+    1.529,
+    1.528
+  ),
+  `R²` = c(
+    0.091,
+    0.091,
+    0.068
+  )
+)
+
+kable(
+  model_table,
+  caption = "Comparison of Candidate Predictive Models",
+  digits = 3,
+  booktabs = TRUE
+) %>%
+  kable_styling(
+    full_width = FALSE,
+    position = "center"
+  )
+```
+
+### Important modeling limitation
+
+Although these models use all available non-leaking variables, the dataset is still small relative to the number of predictors created after dummy encoding team, city, venue, and training-site categories. Consequently, the full linear regression may be rank deficient, and both Random Forest and KNN estimates may vary across samples. The repeated cross-validation results should therefore be interpreted as exploratory evidence rather than definitive estimates of future World Cup performance.
+
+
+##Data Ethics
+
+While our analysis purely focuses on geographical quantities, the sport is eventually influenced by players, managers, tactics, injuries, etc. Geographical quantities only represent a small influence; they should not be mentioned as factors that heavily influence winning/losing. Our measures of countries’ temperatures and altitudes are national averages, even though most players at the World Cup play in either Europe or South America, away from their home countries. There are also a few logistical factors at play. Iran was not allowed to choose a training base, and they were allotted one in Mexico. In a global event that is meant to unite the world and welcome fans and teams to their home country, politics has no place in the event. Therefore, these findings must be used to better understand how geographical quantities may influence match and tournament results, not to stereotype countries or judge their ability to play the sport. 
+
+
+##Conclusions & Future Analysis
+
+This analysis found little evidence that geographical quantities influence match outcomes in the ongoing World Cup. Temperature showed a statistically significant relationship, although not in an expected way. One explanation for this is that teams arrive in the country 2-3 weeks prior and play a friendly or two to get acclimated to the weather. For instance, Germany played the USA in Chicago a week before their opening game. Modern teams also benefit from advanced sports medicine and physical training, reducing the advantages that may have existed in previous World Cups hosted in Mexico (1986) and the USA (1994). Compared with the paper mentioned at the start, it is possible that the spread of high-altitude stadiums in Europe is dissimilar to my dataset. In terms of future analysis, I aim to run the same analysis using match results and data from the 1986 and 1994 World Cups, and track the remaining match results of the current World Cup, since ~60 games are left to be played. I would also analyse the effects of hydration breaks, which I think negates the temperature advantage, and run individual regressions based on venues to check whether specific venues’ geographies affect match performance differently. 
+
+
+
+
+
+
+
